@@ -1,12 +1,13 @@
 import { Suspense, lazy, useEffect } from 'react';
-import { BrowserRouter, Route, Routes } from 'react-router-dom';
+import { BrowserRouter, Route, Routes, Navigate } from 'react-router-dom';
 import Layout from './components/Layout';
+import { useAuth } from './components/AuthWidgets';
 import Home from './pages/Home';
 import Settings from './pages/Settings';
 import TransactionsPage from './pages/TransactionsPage';
+import AuthPage from './pages/Auth';
 import { useStore } from './store';
 
-// Recharts + SheetJS yalnız raporlarda gerekir — ayrı chunk olarak bölünür
 const Reports = lazy(() => import('./pages/Reports'));
 
 function Loading() {
@@ -17,12 +18,18 @@ function Loading() {
   );
 }
 
+function RequireAuth() {
+  const { session, loading } = useAuth();
+  if (loading) return <Loading />;
+  if (!session) return <Navigate to="/auth" replace />;
+  return null;
+}
+
 export default function App() {
   const { init, ready } = useStore();
 
   useEffect(() => {
     init();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   if (!ready) {
@@ -32,7 +39,15 @@ export default function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route element={<Layout />}>
+        <Route path="/auth" element={<AuthPage />} />
+        <Route
+          element={
+            <>
+              <RequireAuth />
+              <Layout />
+            </>
+          }
+        >
           <Route index element={<Home />} />
           <Route path="islemler" element={<TransactionsPage />} />
           <Route
@@ -44,7 +59,7 @@ export default function App() {
             }
           />
           <Route path="ayarlar" element={<Settings />} />
-          <Route path="*" element={<Home />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>
     </BrowserRouter>

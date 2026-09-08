@@ -3,6 +3,7 @@ import { NavLink, Outlet } from 'react-router-dom';
 import type { TransactionType } from '../types';
 import TransactionForm from './TransactionForm';
 import UpdatePrompt from './UpdatePrompt';
+import { SignOutButton, WorkspaceInfo } from '../components/AuthWidgets';
 
 const TABS = [
   { to: '/', label: 'Ana Sayfa', icon: '🏠', end: true },
@@ -18,11 +19,15 @@ export default function Layout() {
   return (
     <div className="mx-auto flex min-h-dvh w-full max-w-xl flex-col bg-slate-100 dark:bg-slate-950">
       <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/90 backdrop-blur dark:border-slate-800 dark:bg-slate-950/90">
-        <div className="px-4 py-3">
-          <h1 className="text-lg font-extrabold tracking-tight text-slate-900 dark:text-white">
-            💰 Gelir Gider Takip
-          </h1>
-          <p className="text-[11px] font-medium text-slate-400 dark:text-slate-500">FarukN Tech</p>
+        <div className="flex items-center justify-between px-4 py-3">
+          <div>
+            <h1 className="text-lg font-extrabold tracking-tight text-slate-900 dark:text-white">
+              💰 Gelir Gider Takip
+            </h1>
+            <WorkspaceInfo />
+            <p className="text-[11px] font-medium text-slate-400 dark:text-slate-500">FarukN Tech</p>
+          </div>
+          <SignOutButton />
         </div>
       </header>
 

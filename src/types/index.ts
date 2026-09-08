@@ -20,6 +20,8 @@ export interface Category {
   type: TransactionType;
   /** hex renk */
   color: string;
+  /** bulut senkron çakışma çözümü için (yerel tohumlarda geriye dönük yok) */
+  updatedAt?: string;
 }
 
 export type ThemeMode = 'dark' | 'light';
