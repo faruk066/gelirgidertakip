@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { db } from './lib/db';
 import { DEFAULT_CATEGORIES, OTHER_EXPENSE_ID, OTHER_INCOME_ID } from './lib/defaultCategories';
+import { addTombstone, addTombstones, backgroundPush, getWorkspace, syncNow } from './lib/sync';
 import type { Category, Settings, ThemeMode, Transaction, TransactionType } from './types';
 
 const THEME_KEY = 'ggt-theme';
@@ -49,6 +50,7 @@ interface Store {
   setTheme: (theme: ThemeMode) => void;
   setCurrency: (currency: string) => void;
   importTransactions: (txs: Transaction[]) => Promise<void>;
+  reload: () => Promise<void>;
   clearAll: () => Promise<void>;
 }
 
@@ -65,13 +67,36 @@ export const useStore = create<Store>()((set, get) => ({
 
     const existing = await db.categories.toArray();
     if (existing.length === 0) {
-      await db.categories.bulkAdd(DEFAULT_CATEGORIES);
+      const now = new Date().toISOString();
+      await db.categories.bulkAdd(DEFAULT_CATEGORIES.map((c) => ({ ...c, updatedAt: now })));
     }
     const [transactions, categories] = await Promise.all([
       db.transactions.orderBy('date').reverse().toArray(),
       db.categories.toArray(),
     ]);
     set({ transactions, categories, ready: true });
+
+    // Bağlı senkron kodu varsa açılışta sessizce eşitle (çevrimiçiyse)
+    if (getWorkspace()) {
+      try {
+        await syncNow();
+        const [t2, c2] = await Promise.all([
+          db.transactions.orderBy('date').reverse().toArray(),
+          db.categories.toArray(),
+        ]);
+        set({ transactions: t2, categories: c2 });
+      } catch {
+        /* çevrimdışı ya da bulut hatası — yerel veriyle devam */
+      }
+    }
+  },
+
+  reload: async () => {
+    const [transactions, categories] = await Promise.all([
+      db.transactions.orderBy('date').reverse().toArray(),
+      db.categories.toArray(),
+    ]);
+    set({ transactions, categories });
   },
 
   addTransaction: async (input) => {
@@ -85,6 +110,7 @@ export const useStore = create<Store>()((set, get) => ({
     };
     await db.transactions.add(tx);
     set({ transactions: [tx, ...get().transactions] });
+    backgroundPush();
   },
 
   updateTransaction: async (id, patch) => {
@@ -94,17 +120,21 @@ export const useStore = create<Store>()((set, get) => ({
     set({
       transactions: get().transactions.map((t) => (t.id === id ? { ...t, ...changes } : t)),
     });
+    backgroundPush();
   },
 
   deleteTransaction: async (id) => {
     await db.transactions.delete(id);
+    addTombstone('transactions', id);
     set({ transactions: get().transactions.filter((t) => t.id !== id) });
+    backgroundPush();
   },
 
   addCategory: async (input) => {
-    const cat: Category = { id: crypto.randomUUID(), ...input, name: input.name.trim() };
+    const cat: Category = { id: crypto.randomUUID(), ...input, name: input.name.trim(), updatedAt: new Date().toISOString() };
     await db.categories.add(cat);
     set({ categories: [...get().categories, cat] });
+    backgroundPush();
   },
 
   deleteCategory: async (id) => {
@@ -126,6 +156,8 @@ export const useStore = create<Store>()((set, get) => ({
       ),
       categories: get().categories.filter((c) => c.id !== id),
     });
+    addTombstone('categories', id);
+    backgroundPush();
   },
 
   setTheme: (theme) => {
@@ -143,8 +175,11 @@ export const useStore = create<Store>()((set, get) => ({
   },
 
   clearAll: async () => {
+    const ids = get().transactions.map((t) => t.id);
     await db.transactions.clear();
+    addTombstones('transactions', ids);
     set({ transactions: [] });
+    backgroundPush();
   },
 
   importTransactions: async (txs) => {
@@ -152,5 +187,6 @@ export const useStore = create<Store>()((set, get) => ({
     await db.transactions.bulkAdd(txs);
     const transactions = await db.transactions.orderBy('date').reverse().toArray();
     set({ transactions });
+    backgroundPush();
   },
 }));

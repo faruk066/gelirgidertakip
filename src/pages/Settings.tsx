@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react';
 import ConfirmModal from '../components/ConfirmModal';
+import SyncSection from '../components/SyncSection';
 import { exportToCSV, parseCSVFile, previewToTransactions, type CsvParseResult } from '../lib/csv';
 import { OTHER_EXPENSE_ID, OTHER_INCOME_ID } from '../lib/defaultCategories';
 import { CURRENCIES } from '../lib/format';
@@ -199,6 +200,8 @@ export default function Settings() {
           </button>
         </form>
       </section>
+
+      <SyncSection />
 
       {/* Veri yönetimi */}
       <section className="rounded-2xl bg-white p-4 shadow-sm dark:bg-slate-900">
