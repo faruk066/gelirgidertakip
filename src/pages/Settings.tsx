@@ -3,6 +3,7 @@ import ConfirmModal from '../components/ConfirmModal';
 import { exportToCSV, parseCSVFile, previewToTransactions, type CsvParseResult } from '../lib/csv';
 import { OTHER_EXPENSE_ID, OTHER_INCOME_ID } from '../lib/defaultCategories';
 import { CURRENCIES } from '../lib/format';
+import { APP_VERSION } from '../lib/version';
 import { useStore } from '../store';
 import type { TransactionType } from '../types';
 
@@ -276,7 +277,7 @@ export default function Settings() {
 
       {/* Hakkında */}
       <section className="rounded-2xl bg-white p-4 text-center shadow-sm dark:bg-slate-900">
-        <p className="font-bold text-slate-800 dark:text-slate-100">Gelir Gider Takip v1.0.0</p>
+        <p className="font-bold text-slate-800 dark:text-slate-100">Gelir Gider Takip {APP_VERSION}</p>
         <p className="mt-1 text-xs text-slate-400">FarukN Tech • Verileriniz yalnızca bu cihazda saklanır</p>
       </section>
 

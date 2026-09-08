@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import type { TransactionType } from '../types';
 import TransactionForm from './TransactionForm';
+import UpdatePrompt from './UpdatePrompt';
 
 const TABS = [
   { to: '/', label: 'Ana Sayfa', icon: '🏠', end: true },
@@ -79,6 +80,8 @@ export default function Layout() {
       )}
 
       {formType && <TransactionForm defaultType={formType} onClose={() => setFormType(null)} />}
+
+      <UpdatePrompt />
 
       {/* Alt navigasyon */}
       <nav className="fixed bottom-0 left-1/2 z-30 w-full max-w-xl -translate-x-1/2 border-t border-slate-200 bg-white pb-[env(safe-area-inset-bottom)] dark:border-slate-800 dark:bg-slate-900">
