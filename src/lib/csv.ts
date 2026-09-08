@@ -50,34 +50,80 @@ export interface CsvParseResult {
 
 const norm = (s: string): string => s.trim().toLocaleLowerCase('tr-TR');
 
-/** CSV dosyasını okur, satır satır doğrular, önizleme için sonuç döndürür */
+/** "50.00" ve "1.234,56" (TR) dahil tutar formatlarını sayıya çevirir */
+function parseAmount(s: string): number {
+  let v = s.trim().replace(/\s/g, '');
+  if (v.includes(',') && v.includes('.')) {
+    // Son ayraç ondalık ayracıdır: TR "1.234,56" ya da US "1,234.56"
+    if (v.lastIndexOf(',') > v.lastIndexOf('.')) v = v.replace(/\./g, '').replace(',', '.');
+    else v = v.replace(/,/g, '');
+  } else if (v.includes(',')) {
+    v = v.replace(',', '.');
+  }
+  return Number(v);
+}
+
+/** "YYYY-MM-DD" veya "GG.AA.YYYY" tarihini ISO'ya çevirir, geçersizse null */
+export function toISODateLoose(s: string): string | null {
+  const v = s.trim();
+  if (isValidISODate(v)) return v;
+  const m = v.match(/^(\d{1,2})[./](\d{1,2})[./](\d{4})$/);
+  if (m) {
+    const iso = `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+    if (isValidISODate(iso)) return iso;
+  }
+  return null;
+}
+
+/** CSV dosyasını okur, satır satır doğrular, önizleme için sonuç döndürür.
+ *  İki format desteklenir: yeni format (id,type,amount,category,date,note,createdAt)
+ *  ve eski gider uygulaması formatı (Tarih,Kategori,Tutar (₺),Not — tamamı gider sayılır). */
 export function parseCSVFile(file: File): Promise<CsvParseResult> {
+  return file
+    .text()
+    .then((text) => parseCSVText(text))
+    .catch((err) => ({ rows: [], fileError: `Dosya okunamadı: ${err instanceof Error ? err.message : String(err)}` }));
+}
+
+/** CSV metnini ayrıştırır (parseCSVFile ile aynı kurallar) */
+export function parseCSVText(text: string): Promise<CsvParseResult> {
   return new Promise((resolve) => {
-    Papa.parse<Record<string, string>>(file, {
+    Papa.parse<Record<string, string>>(text.replace(/^\uFEFF/, ''), {
       header: true,
       skipEmptyLines: true,
-      transformHeader: (h) => h.trim().toLowerCase(),
+      transformHeader: (h) => h.replace(/^\uFEFF/, '').trim().toLowerCase(),
       complete: (res) => {
+        const fields = (res.meta.fields ?? []).map((f) => f.trim().toLowerCase());
+        // Eski format: type sütunu yok, tarih/kategori/tutar var
+        const legacy =
+          !fields.includes('type') &&
+          (fields.includes('tarih') || fields.includes('kategori') || fields.some((f) => f.startsWith('tutar')));
         const rows: CsvPreviewRow[] = (res.data ?? []).map((raw) => {
-          const type = (raw['type'] ?? '').trim().toLowerCase();
-          const amount = Number(String(raw['amount'] ?? '').replace(',', '.'));
-          const categoryName = (raw['category'] ?? '').trim();
-          const date = (raw['date'] ?? '').trim();
-          const note = (raw['note'] ?? '').trim();
-          if (type !== 'income' && type !== 'expense') {
-            return { valid: false, type: '', amount: 0, categoryName, date, note, error: 'Geçersiz tür (income/expense olmalı)' };
+          const typeRaw = (raw['type'] ?? '').trim().toLowerCase();
+          const type: TransactionType | '' = legacy
+            ? 'expense'
+            : typeRaw === 'income' || typeRaw === 'expense'
+              ? typeRaw
+              : '';
+          const amount = parseAmount(String(raw['amount'] ?? raw['tutar (₺)'] ?? raw['tutar'] ?? ''));
+          const categoryName = (raw['category'] ?? raw['kategori'] ?? '').trim();
+          const dateRaw = (raw['date'] ?? raw['tarih'] ?? '').trim();
+          const date = toISODateLoose(dateRaw);
+          const note = (raw['note'] ?? raw['not'] ?? raw['açıklama'] ?? '').trim();
+          if (!type) {
+            return { valid: false, type: '', amount: 0, categoryName, date: dateRaw, note, error: 'Geçersiz tür (income/expense olmalı)' };
           }
           if (!Number.isFinite(amount) || amount <= 0) {
-            return { valid: false, type: type as TransactionType, amount: 0, categoryName, date, note, error: 'Geçersiz tutar' };
+            return { valid: false, type, amount: 0, categoryName, date: dateRaw, note, error: 'Geçersiz tutar' };
           }
-          if (!isValidISODate(date)) {
-            return { valid: false, type: type as TransactionType, amount, categoryName, date, note, error: 'Geçersiz tarih (YYYY-MM-DD olmalı)' };
+          if (!date) {
+            return { valid: false, type, amount, categoryName, date: dateRaw, note, error: 'Geçersiz tarih (YYYY-MM-DD ya da GG.AA.YYYY olmalı)' };
           }
-          return { valid: true, type: type as TransactionType, amount, categoryName, date, note };
+          return { valid: true, type, amount, categoryName, date, note };
         });
         const fileError =
           res.errors.length > 0 && rows.length === 0
-            ? 'Dosya okunamadı. Sütun başlıkları id,type,amount,category,date,note,createdAt olmalı.'
+            ? 'Dosya okunamadı. Beklenen sütunlar: id,type,amount,category,date,note,createdAt ya da eski format Tarih,Kategori,Tutar (₺),Not.'
             : undefined;
         resolve({ rows, fileError });
       },
