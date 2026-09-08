@@ -82,7 +82,7 @@ export function parseCSVFile(file: File): Promise<CsvParseResult> {
   return file
     .text()
     .then((text) => parseCSVText(text))
-    .catch((err) => ({ rows: [], fileError: `Dosya okunamadı: ${err instanceof Error ? err.message : String(err)}` }));
+    .catch((err: unknown) => ({ rows: [], fileError: `Dosya okunamadı: ${err instanceof Error ? err.message : String(err)}` }));
 }
 
 /** CSV metnini ayrıştırır (parseCSVFile ile aynı kurallar) */
@@ -127,7 +127,7 @@ export function parseCSVText(text: string): Promise<CsvParseResult> {
             : undefined;
         resolve({ rows, fileError });
       },
-      error: (err) => resolve({ rows: [], fileError: `Dosya okunamadı: ${err.message}` }),
+      error: (err: Error) => resolve({ rows: [], fileError: `Dosya okunamadı: ${err.message}` }),
     });
   });
 }
