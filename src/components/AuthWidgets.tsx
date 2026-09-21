@@ -180,11 +180,13 @@ export const SignOutButton = () => {
 };
 
 export const WorkspaceInfo = () => {
-  const { workspaceId } = useWorkspace();
-  if (!workspaceId) return null;
+  const { user } = useAuth();
+  const { profile } = useProfile();
+  if (!user) return null;
+  const label = profile?.full_name?.trim() || profile?.email || user.email || 'Kullanıcı';
   return (
-    <span className="text-xs text-slate-400 dark:text-slate-500">
-      • WS: {workspaceId.slice(0, 8)}
+    <span className="block max-w-[220px] truncate text-xs font-semibold text-slate-500 dark:text-slate-400">
+      👤 {label}
     </span>
   );
 };
