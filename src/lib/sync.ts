@@ -5,6 +5,8 @@ import type { Category, Transaction } from '../types';
 const WS_KEY = 'ggt-workspace';
 const LAST_SYNC_KEY = 'ggt-last-sync';
 const TOMBSTONE_KEY = 'ggt-deleted';
+/** Giriş yapan kullanıcının bulut workspace kimliği (auth tabanlı senkron) */
+const WS_ID_KEY = 'ggt-workspace-id';
 
 /* ---------- Senkron kodu (workspace) ---------- */
 
@@ -106,9 +108,10 @@ function newer(a: string | undefined, b: string | undefined): boolean {
   return ta > tb;
 }
 
-interface RemoteTx {
+export interface RemoteTx {
   id: string;
   workspace: string;
+  workspace_id: string | null;
   type: 'income' | 'expense';
   amount: number | string;
   category_id: string;
@@ -118,9 +121,10 @@ interface RemoteTx {
   updated_at: string;
 }
 
-interface RemoteCat {
+export interface RemoteCat {
   id: string;
   workspace: string;
+  workspace_id: string | null;
   name: string;
   icon: string;
   type: 'income' | 'expense';
@@ -270,6 +274,175 @@ export async function syncNow(): Promise<SyncStats> {
   const pushed = await pushAll();
   setLastSync();
   return { ...pushed, ...pulled };
+}
+
+/* ---------- Kullanıcı bazlı bulut (auth) ---------- *
+ * Giriş yapan her kullanıcı kendi workspace'ine bağlanır ve girişten
+ * hemen sonra veritabanındaki kendi verilerini (işlem + kategori) çeker. */
+
+export function getUserWorkspaceId(): string | null {
+  try {
+    return localStorage.getItem(WS_ID_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function saveUserWorkspaceId(id: string): void {
+  try {
+    localStorage.setItem(WS_ID_KEY, id);
+  } catch {
+    /* yoksay */
+  }
+}
+
+async function requireUser() {
+  if (!supabase) throw new Error('Supabase yapılandırılmamış (.env eksik).');
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) throw new Error('Oturum bulunamadı, tekrar giriş yapın.');
+  return { client: supabase, user };
+}
+
+/** Kullanıcının KENDİ workspace'ini bulur; yoksa ilk girişte oluşturur. UUID döner.
+ *  ÖNEMLİ: Sahiplik (owner_id) esastır — üye olunan başkasının workspace'i
+ *  asla veri kaynağı yapılmaz; yoksa yeni üye admin verilerini görür (sızıntı). */
+export async function ensureUserWorkspace(): Promise<string> {
+  const { client, user } = await requireUser();
+  const { data: owned } = await client
+    .from('ggt_workspaces')
+    .select('id')
+    .eq('owner_id', user.id)
+    .limit(1);
+  const own = (owned ?? [])[0] as { id: string } | undefined;
+  if (own?.id) {
+    // Üyelik satırı yoksa ekle (bootstrap; zaten varsa hata yutulur)
+    await client
+      .from('ggt_workspace_members')
+      .insert({ workspace_id: own.id, user_id: user.id, role: 'owner' })
+      .then(() => undefined, () => undefined);
+    saveUserWorkspaceId(own.id);
+    return own.id;
+  }
+
+  const { data: created, error: cErr } = await client
+    .from('ggt_workspaces')
+    .insert({ owner_id: user.id, name: 'Varsayılan' })
+    .select('id')
+    .single();
+  if (cErr || !created) throw new Error(`Çalışma alanı açılamadı: ${cErr?.message ?? 'bilinmeyen hata'}`);
+  const wsId = (created as { id: string }).id;
+  await client
+    .from('ggt_workspace_members')
+    .insert({ workspace_id: wsId, user_id: user.id, role: 'owner' })
+    .then(() => undefined, () => undefined);
+  saveUserWorkspaceId(wsId);
+  return wsId;
+}
+
+/** Buluttaki kullanıcı verisini çekip yerelle birleştir (kayıt bazında son yazan kazanır).
+ *  SADECE üyesi olunan workspace çekilir — workspace_id'siz (NULL) eski satırlar
+ *  çekilmez; yoksa yeni kullanıcılar başkasının verisini görür (sızıntı). */
+export async function pullUserData(): Promise<{ pulledTx: number; pulledCat: number }> {
+  const { client } = await requireUser();
+  const wsId = await ensureUserWorkspace();
+  let pulledTx = 0;
+  let pulledCat = 0;
+
+  const { data: rtx, error: e1 } = await client
+    .from('ggt_transactions')
+    .select()
+    .eq('workspace_id', wsId);
+  if (e1) throw new Error(`Buluttan okunamadı: ${e1.message}`);
+  for (const r of (rtx ?? []) as RemoteTx[]) {
+    const local = await db.transactions.get(r.id);
+    if (!local || newer(r.updated_at, local.updatedAt)) {
+      await db.transactions.put(remoteToTx(r));
+      pulledTx++;
+    }
+  }
+
+  const { data: rcat, error: e2 } = await client
+    .from('ggt_categories')
+    .select()
+    .eq('workspace_id', wsId);
+  if (e2) throw new Error(`Buluttan okunamadı: ${e2.message}`);
+  for (const r of (rcat ?? []) as RemoteCat[]) {
+    const local = await db.categories.get(r.id);
+    if (!local || newer(r.updated_at, local.updatedAt)) {
+      await db.categories.put(remoteToCat(r));
+      pulledCat++;
+    }
+  }
+  return { pulledTx, pulledCat };
+}
+
+/** Yerel veriyi kullanıcının bulut workspace'ine gönder */
+export async function pushUserData(): Promise<void> {
+  const { client, user } = await requireUser();
+  const wsId = await ensureUserWorkspace();
+
+  const txs = await db.transactions.toArray();
+  if (txs.length > 0) {
+    const { error } = await client.from('ggt_transactions').upsert(
+      txs.map((t) => ({
+        id: t.id,
+        workspace: `user:${user.id}`,
+        workspace_id: wsId,
+        type: t.type,
+        amount: t.amount,
+        category_id: t.categoryId,
+        date: t.date,
+        note: t.note ?? null,
+        created_at: t.createdAt,
+        updated_at: t.updatedAt,
+      })),
+      { onConflict: 'id' },
+    );
+    if (error) throw new Error(`Buluta yazılamadı: ${error.message}`);
+  }
+
+  const cats = await db.categories.toArray();
+  if (cats.length > 0) {
+    const { error } = await client.from('ggt_categories').upsert(
+      cats.map((c) => ({
+        id: c.id,
+        workspace: `user:${user.id}`,
+        workspace_id: wsId,
+        name: c.name,
+        icon: c.icon,
+        type: c.type,
+        color: c.color,
+        updated_at: c.updatedAt ?? new Date().toISOString(),
+      })),
+      { onConflict: 'id' },
+    );
+    if (error) throw new Error(`Buluta yazılamadı: ${error.message}`);
+  }
+}
+
+/** SADECE kategorileri kullanıcının kendi workspace'ine yazar (işlemlere dokunmaz).
+ *  Yeni/boş kullanıcı akışında kullanılır — başkasının işlem verisini ezme riski yok. */
+export async function pushUserCategories(): Promise<void> {
+  const { client, user } = await requireUser();
+  const wsId = getUserWorkspaceId() ?? (await ensureUserWorkspace());
+  const cats = await db.categories.toArray();
+  if (cats.length === 0) return;
+  const { error } = await client.from('ggt_categories').upsert(
+    cats.map((c) => ({
+      id: c.id,
+      workspace: `user:${user.id}`,
+      workspace_id: wsId,
+      name: c.name,
+      icon: c.icon,
+      type: c.type,
+      color: c.color,
+      updated_at: c.updatedAt ?? new Date().toISOString(),
+    })),
+    { onConflict: 'id' },
+  );
+  if (error) throw new Error(`Buluta yazılamadı: ${error.message}`);
 }
 
 /** Değişiklik sonrası sessiz arka plan gönderimi (hata yutulur) */

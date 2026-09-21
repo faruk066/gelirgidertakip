@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { db } from './lib/db';
 import { DEFAULT_CATEGORIES, OTHER_EXPENSE_ID, OTHER_INCOME_ID } from './lib/defaultCategories';
-import { addTombstone, addTombstones, backgroundPush, getWorkspace, syncNow } from './lib/sync';
+import { addTombstone, addTombstones, backgroundPush, getWorkspace, pullUserData, pushUserData, pushUserCategories, syncNow } from './lib/sync';
 import type { Category, Settings, ThemeMode, Transaction, TransactionType } from './types';
 
 const THEME_KEY = 'ggt-theme';
@@ -36,12 +36,25 @@ export interface NewTransaction {
   note?: string;
 }
 
+export type SyncStatus = 'idle' | 'syncing' | 'ready' | 'error';
+
+export interface SyncState {
+  status: SyncStatus;
+  message: string;
+  lastUserId: string | null;
+}
+
 interface Store {
   transactions: Transaction[];
   categories: Category[];
   settings: Settings;
   ready: boolean;
+  syncState: SyncState;
   init: () => Promise<void>;
+  /** Giriş yapan kullanıcının bulut verisini çek + ekrana yansıt */
+  syncUserData: (userId: string) => Promise<void>;
+  /** Çıkışta yerel kullanıcı verisini temizle (hesap karışmasın) */
+  clearLocalData: () => Promise<void>;
   addTransaction: (input: NewTransaction) => Promise<void>;
   updateTransaction: (id: string, patch: Partial<NewTransaction>) => Promise<void>;
   deleteTransaction: (id: string) => Promise<void>;
@@ -59,6 +72,7 @@ export const useStore = create<Store>()((set, get) => ({
   categories: [],
   settings: loadSettings(),
   ready: false,
+  syncState: { status: 'idle', message: '', lastUserId: null },
 
   init: async () => {
     if (get().ready) return;
@@ -97,6 +111,93 @@ export const useStore = create<Store>()((set, get) => ({
       db.categories.toArray(),
     ]);
     set({ transactions, categories });
+  },
+
+  syncUserData: async (userId) => {
+    const st = get().syncState;
+    // Aynı kullanıcı için tekrar çekme (StrictMode çift effect koruması dahil)
+    if (st.lastUserId === userId && (st.status === 'ready' || st.status === 'syncing')) return;
+    set({ syncState: { status: 'syncing', message: 'Buluttaki verileriniz yükleniyor…', lastUserId: userId } });
+    try {
+      // Önce yereli temizle: önceki hesabın verisi yeni hesaba karışmasın!
+      await db.transactions.clear();
+      await db.categories.clear();
+      set({ transactions: [], categories: [] });
+      const { pulledTx, pulledCat } = await pullUserData();
+      // Kategori onarımı: işlemin categoryId'si yerelde yoksa ad+tip ile eşleştir
+      // (farklı cihazda aynı varsayılan kategori farklı id ile olabilir;
+      //  eşleşmezse liste "Diğer" gösterir — ekran görüntüsündeki bug buydu)
+      let categories = await db.categories.toArray();
+      const byId = new Map(categories.map((c) => [c.id, c]));
+      const byKey = new Map(categories.map((c) => [`${c.name}::${c.type}`, c]));
+      const localTxs = await db.transactions.toArray();
+      let fixed = 0;
+      for (const t of localTxs) {
+        if (byId.has(t.categoryId)) continue;
+        const fallback = DEFAULT_CATEGORIES.find((c) => c.id === t.categoryId);
+        if (!fallback) continue;
+        const match = byKey.get(`${fallback.name}::${fallback.type}`);
+        if (match) {
+          await db.transactions.update(t.id, { categoryId: match.id });
+          fixed++;
+        } else {
+          const now2 = new Date().toISOString();
+          await db.categories.put({ ...fallback, updatedAt: now2 });
+          const fresh = { ...fallback, updatedAt: now2 };
+          byId.set(fresh.id, fresh);
+          byKey.set(`${fresh.name}::${fresh.type}`, fresh);
+          fixed++;
+        }
+      }
+      if (fixed > 0) {
+        categories = await db.categories.toArray();
+        try { await pushUserCategories(); } catch { /* yoksay */ }
+      }
+      // Yeni kullanıcı: bulutta kategori yoksa varsayılanları kur (bulkPut: çakışma güvenli)
+      if (categories.length === 0) {
+        const now = new Date().toISOString();
+        await db.categories.bulkPut(DEFAULT_CATEGORIES.map((c) => ({ ...c, updatedAt: now })));
+        categories = await db.categories.toArray();
+      }
+      // Sadece gerçekten çekilen veri varsa buluta yaz; boşken push = başkasının verisini ezme!
+      if (pulledTx > 0 || pulledCat > 0) {
+        try {
+          await pushUserData();
+        } catch {
+          /* push hatası veri çekmeyi engellemesin */
+        }
+      // Yeni/boş kullanıcı: SADECE kategorileri kendi workspace'ine yaz (işlem push'u yok).
+      } else {
+        try {
+          await pushUserCategories();
+        } catch {
+          /* yoksay */
+        }
+      }
+      const transactions = await db.transactions.orderBy('date').reverse().toArray();
+      set({
+        transactions,
+        categories,
+        syncState: { status: 'ready', message: '', lastUserId: userId },
+      });
+    } catch (e) {
+      set({
+        syncState: {
+          status: 'error',
+          message: e instanceof Error ? e.message : 'Bulut verisi alınamadı.',
+          lastUserId: null,
+        },
+      });
+    }
+  },
+
+  clearLocalData: async () => {
+    await db.transactions.clear();
+    await db.categories.clear();
+    const now = new Date().toISOString();
+    await db.categories.bulkAdd(DEFAULT_CATEGORIES.map((c) => ({ ...c, updatedAt: now })));
+    const categories = await db.categories.toArray();
+    set({ transactions: [], categories, syncState: { status: 'idle', message: '', lastUserId: null } });
   },
 
   addTransaction: async (input) => {

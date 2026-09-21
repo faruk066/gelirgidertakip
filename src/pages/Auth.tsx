@@ -1,13 +1,32 @@
 import { useState } from 'react';
-import { supabase } from '../lib/auth';
+import { useNavigate } from 'react-router-dom';
+import { supabase } from '../lib/supabase';
+
+function trError(message: string): string {
+  if (/email not confirmed/i.test(message)) {
+    return 'E-posta onaylanmamış. Supabase → Authentication → Sign In / Up → "Confirm email" kapalı olmalı; ya da SQL ile e-postayı onaylayın (aşağıya bakın).';
+  }
+  if (/invalid login credentials|invalid.*password/i.test(message)) {
+    return 'E-posta veya şifre hatalı.';
+  }
+  if (/user already registered|already exists/i.test(message)) {
+    return 'Bu e-posta zaten kayıtlı. Giriş yapmayı deneyin.';
+  }
+  if (/email.*invalid|invalid.*email/i.test(message)) {
+    return 'E-posta adresi geçersiz görünüyor. Gerçek bir adres yazın (örn. ad@mail.com).';
+  }
+  return message;
+}
 
 export default function AuthPage() {
+  const navigate = useNavigate();
   const [mode, setMode] = useState<'signin' | 'signup'>('signin');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [fullName, setFullName] = useState('');
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const [busy, setBusy] = useState(false);
 
   const handle = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -19,24 +38,36 @@ export default function AuthPage() {
       return;
     }
 
-    if (mode === 'signin') {
-      const { error: err } = await supabase.auth.signInWithPassword({
-        email,
-        password,
-      });
-      if (err) setError(err.message);
-    }
-
-    if (mode === 'signup') {
-      const { error: err } = await supabase.auth.signUp({
-        email,
-        password,
-        options: { data: { full_name: fullName } },
-      });
-      if (err) setError(err.message);
-      else {
-        setSuccess('Kayıt olduğunuzdan emin olun. E-posta doğrulama linki gönderildi.');
+    setBusy(true);
+    try {
+      if (mode === 'signin') {
+        const { error: err } = await supabase.auth.signInWithPassword({
+          email,
+          password,
+        });
+        if (err) {
+          setError(trError(err.message));
+          return;
+        }
+        // onAuthStateChange RequireGuest'i tetikler; garanti olması için
+        // manuel yönlendirme de yap (replace: geri tuşu /auth'a dönmesin).
+        navigate('/', { replace: true });
       }
+
+      if (mode === 'signup') {
+        const { error: err } = await supabase.auth.signUp({
+          email,
+          password,
+          options: { data: { full_name: fullName } },
+        });
+        if (err) {
+          setError(trError(err.message));
+        } else {
+          setSuccess('Kayıt oluşturuldu. E-posta onayı kapalıysa doğrudan giriş yapabilirsiniz.');
+        }
+      }
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -98,9 +129,10 @@ export default function AuthPage() {
           )}
           <button
             type="submit"
-            className="w-full rounded-xl bg-emerald-600 px-4 py-3 font-bold text-white"
+            disabled={busy}
+            className="w-full rounded-xl bg-emerald-600 px-4 py-3 font-bold text-white disabled:opacity-60"
           >
-            {mode === 'signin' ? 'Giriş Yap' : 'Kaydol'}
+            {busy ? 'Bekleyin…' : mode === 'signin' ? 'Giriş Yap' : 'Kaydol'}
           </button>
         </form>
 

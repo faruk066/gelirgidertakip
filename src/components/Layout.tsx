@@ -3,7 +3,7 @@ import { NavLink, Outlet } from 'react-router-dom';
 import type { TransactionType } from '../types';
 import TransactionForm from './TransactionForm';
 import UpdatePrompt from './UpdatePrompt';
-import { SignOutButton, WorkspaceInfo } from '../components/AuthWidgets';
+import { SignOutButton, WorkspaceInfo, useProfile } from '../components/AuthWidgets';
 
 const TABS = [
   { to: '/', label: 'Ana Sayfa', icon: '🏠', end: true },
@@ -15,6 +15,10 @@ const TABS = [
 export default function Layout() {
   const [fabOpen, setFabOpen] = useState(false);
   const [formType, setFormType] = useState<TransactionType | null>(null);
+  const { isAdmin } = useProfile();
+  const tabs = isAdmin
+    ? [...TABS, { to: '/admin', label: 'Admin', icon: '🛡️', end: false }]
+    : TABS;
 
   return (
     <div className="mx-auto flex min-h-dvh w-full max-w-xl flex-col bg-slate-100 dark:bg-slate-950">
@@ -90,8 +94,8 @@ export default function Layout() {
 
       {/* Alt navigasyon */}
       <nav className="fixed bottom-0 left-1/2 z-30 w-full max-w-xl -translate-x-1/2 border-t border-slate-200 bg-white pb-[env(safe-area-inset-bottom)] dark:border-slate-800 dark:bg-slate-900">
-        <div className="grid grid-cols-4">
-          {TABS.map((t) => (
+        <div className="grid grid-cols-5">
+          {tabs.map((t) => (
             <NavLink
               key={t.to}
               to={t.to}

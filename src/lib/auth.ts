@@ -1,6 +1,3 @@
-import { createClient } from '@supabase/supabase-js';
-
-export const supabase = createClient(
-  import.meta.env.VITE_SUPABASE_URL || '',
-  import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || ''
-);
+/** @deprecated `supabase` importları için `../lib/supabase` kullanın.
+ *  Tek Supabase client instance garantisi için buradan re-export edilir. */
+export { supabase, isSupabaseConfigured } from './supabase';
