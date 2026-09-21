@@ -26,10 +26,9 @@ export default function Layout() {
         <div className="flex items-center justify-between px-4 py-3">
           <div>
             <h1 className="text-lg font-extrabold tracking-tight text-slate-900 dark:text-white">
-              💰 Gelir Gider Takip
+              💰 Gelir Gider Takip-FarukN Tech
             </h1>
             <WorkspaceInfo />
-            <p className="text-[11px] font-medium text-slate-400 dark:text-slate-500">FarukN Tech</p>
           </div>
           <SignOutButton />
         </div>
