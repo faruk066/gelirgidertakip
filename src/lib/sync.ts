@@ -310,6 +310,18 @@ async function requireUser() {
  *  asla veri kaynağı yapılmaz; yoksa yeni üye admin verilerini görür (sızıntı). */
 export async function ensureUserWorkspace(): Promise<string> {
   const { client, user } = await requireUser();
+  // 1) Kayıtlı workspace kimliği varsa önce onu doğrula (hızlı yol, sorgusuz)
+  const cached = getUserWorkspaceId();
+  if (cached) {
+    const { data: ok } = await client
+      .from('ggt_workspaces')
+      .select('id')
+      .eq('id', cached)
+      .eq('owner_id', user.id)
+      .limit(1);
+    if ((ok ?? []).length > 0) return cached;
+    // Önbellek başkasının/bozuk — devam edip gerçeğini bul
+  }
   const { data: owned } = await client
     .from('ggt_workspaces')
     .select('id')
@@ -317,11 +329,13 @@ export async function ensureUserWorkspace(): Promise<string> {
     .limit(1);
   const own = (owned ?? [])[0] as { id: string } | undefined;
   if (own?.id) {
-    // Üyelik satırı yoksa ekle (bootstrap; zaten varsa hata yutulur)
-    await client
+    // Üyelik satırı yoksa ekle — 409 (zaten üye) sessizce yutulur, akış DURMAZ
+    const { error: mErr } = await client
       .from('ggt_workspace_members')
-      .insert({ workspace_id: own.id, user_id: user.id, role: 'owner' })
-      .then(() => undefined, () => undefined);
+      .insert({ workspace_id: own.id, user_id: user.id, role: 'owner' });
+    if (mErr && !/duplicate|conflict|already|unique/i.test(mErr.message)) {
+      // Gerçek hata bile akışı durdurmasın — üyelik kritik değil, veri çekme kritik
+    }
     saveUserWorkspaceId(own.id);
     return own.id;
   }
@@ -333,6 +347,7 @@ export async function ensureUserWorkspace(): Promise<string> {
     .single();
   if (cErr || !created) throw new Error(`Çalışma alanı açılamadı: ${cErr?.message ?? 'bilinmeyen hata'}`);
   const wsId = (created as { id: string }).id;
+  // Owner üyeliği 409 verirse yut (migration-006 unique constraint sonrası normal)
   await client
     .from('ggt_workspace_members')
     .insert({ workspace_id: wsId, user_id: user.id, role: 'owner' })

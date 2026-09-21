@@ -118,6 +118,19 @@ export const useStore = create<Store>()((set, get) => ({
     // Aynı kullanıcı için tekrar çekme (StrictMode çift effect koruması dahil)
     if (st.lastUserId === userId && (st.status === 'ready' || st.status === 'syncing')) return;
     set({ syncState: { status: 'syncing', message: 'Buluttaki verileriniz yükleniyor…', lastUserId: userId } });
+    // Takılmaya karşı emniyet: 25 sn'de bitmezse hataya düşür (ekran sonsuza dek kilitlenmesin)
+    const timeout = setTimeout(() => {
+      const cur = get().syncState;
+      if (cur.status === 'syncing' && cur.lastUserId === userId) {
+        set({
+          syncState: {
+            status: 'error',
+            message: 'Bulut yavaş yanıt veriyor. Ayarlar → Şimdi Senkronize Et ile tekrar deneyin.',
+            lastUserId: null,
+          },
+        });
+      }
+    }, 25000);
     try {
       // Önce yereli temizle: önceki hesabın verisi yeni hesaba karışmasın!
       await db.transactions.clear();
@@ -175,12 +188,14 @@ export const useStore = create<Store>()((set, get) => ({
         }
       }
       const transactions = await db.transactions.orderBy('date').reverse().toArray();
+      clearTimeout(timeout);
       set({
         transactions,
         categories,
         syncState: { status: 'ready', message: '', lastUserId: userId },
       });
     } catch (e) {
+      clearTimeout(timeout);
       set({
         syncState: {
           status: 'error',
