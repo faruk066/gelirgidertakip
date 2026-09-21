@@ -394,37 +394,60 @@ export async function pullUserData(): Promise<{ pulledTx: number; pulledCat: num
 }
 
 /** Yerel veriyi kullanıcının bulut workspace'ine gönder.
- *  UPSERT YOK — önce update, yoksa insert. Sebep: upsert, mevcut satırın
- *  eski workspace_id'si üzerinden USING kontrolüne takılıp RLS 403 veriyordu
- *  (ekrandaki "USING expression" hatası buydu). */
+ *  Kategori kısmı toplu-diff ile, işlemler de aynı mantıkla:
+ *  önce buluttaki id'ler öğrenilir, sadece eksik/yeni olanlar yazılır.
+ *  Sebep: kör update+insert döngüsü RLS USING'e takılıyordu. */
 export async function pushUserData(): Promise<void> {
   const { client, user } = await requireUser();
   const wsId = await ensureUserWorkspace();
 
   const txs = await db.transactions.toArray();
-  for (const t of txs) {
-    const row = {
-      workspace: `user:${user.id}`,
-      workspace_id: wsId,
-      type: t.type,
-      amount: t.amount,
-      category_id: t.categoryId,
-      date: t.date,
-      note: t.note ?? null,
-      created_at: t.createdAt,
-      updated_at: t.updatedAt,
-    };
-    const { data: upd, error: uErr } = await client
+  if (txs.length > 0) {
+    const { data: existingTx } = await client
       .from('ggt_transactions')
-      .update(row)
-      .eq('id', t.id)
-      .select('id');
-    if (uErr) throw new Error(`Buluta yazılamadı: ${uErr.message}`);
-    if (!upd || upd.length === 0) {
-      const { error: iErr } = await client
+      .select('id, updated_at')
+      .eq('workspace_id', wsId);
+    const remoteTx = new Map(
+      ((existingTx ?? []) as { id: string; updated_at: string }[]).map((r) => [r.id, r.updated_at]),
+    );
+    const newTx = txs.filter((t) => !remoteTx.has(t.id));
+    if (newTx.length > 0) {
+      const { error: iErr } = await client.from('ggt_transactions').insert(
+        newTx.map((t) => ({
+          id: t.id,
+          workspace: `user:${user.id}`,
+          workspace_id: wsId,
+          type: t.type,
+          amount: t.amount,
+          category_id: t.categoryId,
+          date: t.date,
+          note: t.note ?? null,
+          created_at: t.createdAt,
+          updated_at: t.updatedAt,
+        })),
+      );
+      if (iErr && !/duplicate|conflict|already|unique|409/i.test(iErr.message)) {
+        throw new Error(`Buluta yazılamadı: ${iErr.message}`);
+      }
+    }
+    for (const t of txs) {
+      const rTs = remoteTx.get(t.id);
+      if (!rTs || Date.parse(t.updatedAt) <= Date.parse(rTs)) continue;
+      const { error: uErr } = await client
         .from('ggt_transactions')
-        .insert({ id: t.id, ...row });
-      if (iErr) throw new Error(`Buluta yazılamadı: ${iErr.message}`);
+        .update({
+          workspace: `user:${user.id}`,
+          workspace_id: wsId,
+          type: t.type,
+          amount: t.amount,
+          category_id: t.categoryId,
+          date: t.date,
+          note: t.note ?? null,
+          updated_at: t.updatedAt,
+        })
+        .eq('id', t.id)
+        .eq('workspace_id', wsId);
+      if (uErr) throw new Error(`Buluta yazılamadı: ${uErr.message}`);
     }
   }
 
@@ -432,14 +455,26 @@ export async function pushUserData(): Promise<void> {
 }
 
 /** SADECE kategorileri kullanıcının kendi workspace'ine yazar (işlemlere dokunmaz).
- *  Önce update, yoksa insert — upsert'in USING takılması burada da geçerli. */
+ *  Döngüsel update denemesi YOK — doğrudan insert, 409/duplicate ise atlanır.
+ *  Sebep: update+insert döngüsü RLS USING + unique çakışmalarında senkronu
+ *  kilitliyordu (konsoldaki ggt_categories 409 + takılan "Senkronize ediliyor"). */
 export async function pushUserCategories(): Promise<void> {
   const { client, user } = await requireUser();
   const wsId = getUserWorkspaceId() ?? (await ensureUserWorkspace());
   const cats = await db.categories.toArray();
   if (cats.length === 0) return;
-  for (const c of cats) {
-    const row = {
+
+  // Bulutta bu workspace'te hangi id'ler var? Tek sorguda öğren.
+  const { data: existing } = await client
+    .from('ggt_categories')
+    .select('id, updated_at')
+    .eq('workspace_id', wsId);
+  const remote = new Map(((existing ?? []) as { id: string; updated_at: string }[]).map((r) => [r.id, r.updated_at]));
+
+  const toInsert = cats
+    .filter((c) => !remote.has(c.id))
+    .map((c) => ({
+      id: c.id,
       workspace: `user:${user.id}`,
       workspace_id: wsId,
       name: c.name,
@@ -447,18 +482,35 @@ export async function pushUserCategories(): Promise<void> {
       type: c.type,
       color: c.color,
       updated_at: c.updatedAt ?? new Date().toISOString(),
-    };
-    const { data: upd, error: uErr } = await client
-      .from('ggt_categories')
-      .update(row)
-      .eq('id', c.id)
-      .select('id');
-    if (uErr) throw new Error(`Buluta yazılamadı: ${uErr.message}`);
-    if (!upd || upd.length === 0) {
-      const { error: iErr } = await client
+    }));
+  if (toInsert.length > 0) {
+    const { error: iErr } = await client.from('ggt_categories').insert(toInsert);
+    // 409/duplicate: başka cihaz aynı anda eklemiş — kritik değil, yut
+    if (iErr && !/duplicate|conflict|already|unique|409/i.test(iErr.message)) {
+      throw new Error(`Buluta yazılamadı: ${iErr.message}`);
+    }
+  }
+
+  // Sadece buluttakinden YENİ olan yereller güncellenir (last-write-wins)
+  for (const c of cats) {
+    const rTs = remote.get(c.id);
+    if (!rTs) continue;
+    const lTs = c.updatedAt ?? '';
+    if (Date.parse(lTs) > Date.parse(rTs)) {
+      const { error: uErr } = await client
         .from('ggt_categories')
-        .insert({ id: c.id, ...row });
-      if (iErr) throw new Error(`Buluta yazılamadı: ${iErr.message}`);
+        .update({
+          workspace: `user:${user.id}`,
+          workspace_id: wsId,
+          name: c.name,
+          icon: c.icon,
+          type: c.type,
+          color: c.color,
+          updated_at: lTs,
+        })
+        .eq('id', c.id)
+        .eq('workspace_id', wsId);
+      if (uErr) throw new Error(`Buluta yazılamadı: ${uErr.message}`);
     }
   }
 }
