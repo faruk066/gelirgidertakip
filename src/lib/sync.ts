@@ -378,60 +378,53 @@ export async function pullUserData(): Promise<{ pulledTx: number; pulledCat: num
   return { pulledTx, pulledCat };
 }
 
-/** Yerel veriyi kullanıcının bulut workspace'ine gönder */
+/** Yerel veriyi kullanıcının bulut workspace'ine gönder.
+ *  UPSERT YOK — önce update, yoksa insert. Sebep: upsert, mevcut satırın
+ *  eski workspace_id'si üzerinden USING kontrolüne takılıp RLS 403 veriyordu
+ *  (ekrandaki "USING expression" hatası buydu). */
 export async function pushUserData(): Promise<void> {
   const { client, user } = await requireUser();
   const wsId = await ensureUserWorkspace();
 
   const txs = await db.transactions.toArray();
-  if (txs.length > 0) {
-    const { error } = await client.from('ggt_transactions').upsert(
-      txs.map((t) => ({
-        id: t.id,
-        workspace: `user:${user.id}`,
-        workspace_id: wsId,
-        type: t.type,
-        amount: t.amount,
-        category_id: t.categoryId,
-        date: t.date,
-        note: t.note ?? null,
-        created_at: t.createdAt,
-        updated_at: t.updatedAt,
-      })),
-      { onConflict: 'id' },
-    );
-    if (error) throw new Error(`Buluta yazılamadı: ${error.message}`);
+  for (const t of txs) {
+    const row = {
+      workspace: `user:${user.id}`,
+      workspace_id: wsId,
+      type: t.type,
+      amount: t.amount,
+      category_id: t.categoryId,
+      date: t.date,
+      note: t.note ?? null,
+      created_at: t.createdAt,
+      updated_at: t.updatedAt,
+    };
+    const { data: upd, error: uErr } = await client
+      .from('ggt_transactions')
+      .update(row)
+      .eq('id', t.id)
+      .select('id');
+    if (uErr) throw new Error(`Buluta yazılamadı: ${uErr.message}`);
+    if (!upd || upd.length === 0) {
+      const { error: iErr } = await client
+        .from('ggt_transactions')
+        .insert({ id: t.id, ...row });
+      if (iErr) throw new Error(`Buluta yazılamadı: ${iErr.message}`);
+    }
   }
 
-  const cats = await db.categories.toArray();
-  if (cats.length > 0) {
-    const { error } = await client.from('ggt_categories').upsert(
-      cats.map((c) => ({
-        id: c.id,
-        workspace: `user:${user.id}`,
-        workspace_id: wsId,
-        name: c.name,
-        icon: c.icon,
-        type: c.type,
-        color: c.color,
-        updated_at: c.updatedAt ?? new Date().toISOString(),
-      })),
-      { onConflict: 'id' },
-    );
-    if (error) throw new Error(`Buluta yazılamadı: ${error.message}`);
-  }
+  await pushUserCategories();
 }
 
 /** SADECE kategorileri kullanıcının kendi workspace'ine yazar (işlemlere dokunmaz).
- *  Yeni/boş kullanıcı akışında kullanılır — başkasının işlem verisini ezme riski yok. */
+ *  Önce update, yoksa insert — upsert'in USING takılması burada da geçerli. */
 export async function pushUserCategories(): Promise<void> {
   const { client, user } = await requireUser();
   const wsId = getUserWorkspaceId() ?? (await ensureUserWorkspace());
   const cats = await db.categories.toArray();
   if (cats.length === 0) return;
-  const { error } = await client.from('ggt_categories').upsert(
-    cats.map((c) => ({
-      id: c.id,
+  for (const c of cats) {
+    const row = {
       workspace: `user:${user.id}`,
       workspace_id: wsId,
       name: c.name,
@@ -439,18 +432,51 @@ export async function pushUserCategories(): Promise<void> {
       type: c.type,
       color: c.color,
       updated_at: c.updatedAt ?? new Date().toISOString(),
-    })),
-    { onConflict: 'id' },
-  );
-  if (error) throw new Error(`Buluta yazılamadı: ${error.message}`);
+    };
+    const { data: upd, error: uErr } = await client
+      .from('ggt_categories')
+      .update(row)
+      .eq('id', c.id)
+      .select('id');
+    if (uErr) throw new Error(`Buluta yazılamadı: ${uErr.message}`);
+    if (!upd || upd.length === 0) {
+      const { error: iErr } = await client
+        .from('ggt_categories')
+        .insert({ id: c.id, ...row });
+      if (iErr) throw new Error(`Buluta yazılamadı: ${iErr.message}`);
+    }
+  }
 }
 
-/** Değişiklik sonrası sessiz arka plan gönderimi (hata yutulur) */
+/** Değişiklik sonrası otomatik bulut gönderimi.
+ *  Eski "senkron kodu" kontrolü kaldırıldı — giriş yapan hesabın kendi
+ *  workspace'ine (update-yoksa-insert) sessizce yazar. Hata yutulur;
+ *  manuel senkron ekranında görünür. */
+let pushTimer: ReturnType<typeof setTimeout> | null = null;
+let pushRunning = false;
+
+async function runAutoPush(): Promise<void> {
+  if (pushRunning) return;
+  if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+  pushRunning = true;
+  try {
+    await pushUserData();
+  } catch {
+    /* sessiz: manuel senkron ekranında hata görünür */
+  } finally {
+    pushRunning = false;
+  }
+}
+
+/** Her yazma işleminden sonra çağrılır — 800ms debounce ile toplu gönderir. */
 export function backgroundPush(): void {
   try {
-    if (!getWorkspace() || !supabase) return;
-    if (typeof navigator !== 'undefined' && !navigator.onLine) return;
-    pushAll().catch(() => undefined);
+    if (!supabase) return;
+    if (pushTimer) clearTimeout(pushTimer);
+    pushTimer = setTimeout(() => {
+      pushTimer = null;
+      void runAutoPush();
+    }, 800);
   } catch {
     /* yoksay */
   }
