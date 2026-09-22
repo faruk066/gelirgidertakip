@@ -44,7 +44,10 @@ function RequireGuest() {
   return <AuthPage />;
 }
 
-/** Giriş yapan kullanıcının bulut verisini hemen çek; çıkışta yereli temizle */
+/** Giriş yapan kullanıcının bulut verisini ARKA PLANDA çek (offline-first).
+ *  Yerel veri anında gösterilir; bulut eşitlemesi banner ile bildirilir,
+ *  ekranı kilitleyen tam sayfa overlay YOK. Çevrimdışıyken ağ denenmez;
+ *  bağlantı dönünce otomatik tekrar denenir. */
 function UserDataSync() {
   const { user, loading } = useAuth();
   const syncUserData = useStore((s) => s.syncUserData);
@@ -65,20 +68,44 @@ function UserDataSync() {
     }
   }, [user?.id, loading, syncUserData, clearLocalData]);
 
+  // Bağlantı geri gelince yarım kalan senkronu otomatik tekrar dene
+  useEffect(() => {
+    const onOnline = () => {
+      const cur = useStore.getState().syncState;
+      const uid = prevUser.current;
+      if (uid && cur.status !== 'syncing') {
+        // lastUserId sıfırlanmış olabilir (timeout sonrası) — tekrar dene
+        useStore.setState({
+          syncState: { status: 'idle', message: '', lastUserId: null },
+        });
+        void useStore.getState().syncUserData(uid);
+      }
+    };
+    window.addEventListener('online', onOnline);
+    return () => window.removeEventListener('online', onOnline);
+  }, []);
+
   if (syncStatus === 'syncing') {
     return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-100 dark:bg-slate-950">
-        <p className="font-semibold text-slate-500 dark:text-slate-400">
-          ☁️ {syncMessage || 'Buluttaki verileriniz yükleniyor…'}
-        </p>
+      <div className="pointer-events-none fixed left-1/2 top-2 z-50 w-max max-w-[90vw] -translate-x-1/2 rounded-full bg-slate-900/90 px-4 py-1.5 text-xs font-bold text-white shadow-lg dark:bg-white/90 dark:text-slate-900">
+        ☁️ {syncMessage || 'Eşitleniyor…'}
       </div>
     );
   }
   if (syncStatus === 'error' && user) {
     return (
-      <div className="fixed bottom-20 left-1/2 z-50 w-max max-w-[90vw] -translate-x-1/2 rounded-xl bg-red-600 px-4 py-2 text-sm font-bold text-white shadow-lg">
-        ⚠️ {syncMessage}
-      </div>
+      <button
+        type="button"
+        onClick={() => {
+          const uid = prevUser.current ?? user.id;
+          useStore.setState({ syncState: { status: 'idle', message: '', lastUserId: null } });
+          void useStore.getState().syncUserData(uid);
+        }}
+        title="Tekrar denemek için dokun"
+        className="fixed bottom-20 left-1/2 z-50 w-max max-w-[90vw] -translate-x-1/2 rounded-xl bg-amber-500 px-4 py-2 text-sm font-bold text-white shadow-lg"
+      >
+        ⚠️ {syncMessage} (dokun: tekrar dene)
+      </button>
     );
   }
   return null;

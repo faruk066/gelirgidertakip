@@ -117,25 +117,50 @@ export const useStore = create<Store>()((set, get) => ({
     const st = get().syncState;
     // Aynı kullanıcı için tekrar çekme (StrictMode çift effect koruması dahil)
     if (st.lastUserId === userId && (st.status === 'ready' || st.status === 'syncing')) return;
-    set({ syncState: { status: 'syncing', message: 'Buluttaki verileriniz yükleniyor…', lastUserId: userId } });
-    // Takılmaya karşı emniyet: 25 sn'de bitmezse hataya düşür (ekran sonsuza dek kilitlenmesin)
+    // OFFLINE-FIRST: önce yereli ekrana koy, ağ arka planda çalışsın.
+    // Asla önce silme: çevrimdışıyken pull başarısız olursa veri kaybı olurdu.
+    try {
+      const [localTx, localCat] = await Promise.all([
+        db.transactions.orderBy('date').reverse().toArray(),
+        db.categories.toArray(),
+      ]);
+      set({
+        transactions: localTx,
+        categories: localCat.length > 0 ? localCat : get().categories,
+        syncState: { status: 'syncing', message: 'Buluttaki verileriniz yükleniyor…', lastUserId: userId },
+      });
+    } catch {
+      set({ syncState: { status: 'syncing', message: 'Buluttaki verileriniz yükleniyor…', lastUserId: userId } });
+    }
+    // Çevrimdışıysa ağı hiç bekleme — yerel veriyle devam et
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      set({
+        syncState: {
+          status: 'ready',
+          message: 'Çevrimdışısınız — yerel veriler gösteriliyor.',
+          lastUserId: userId,
+        },
+      });
+      return;
+    }
+    // Takılmaya karşı emniyet: 25 sn'de bitmezse hataya düşür (ekran kilitlenmesin;
+    // veri zaten yerelden görünüyor, banner gösterilir)
     const timeout = setTimeout(() => {
       const cur = get().syncState;
       if (cur.status === 'syncing' && cur.lastUserId === userId) {
         set({
           syncState: {
             status: 'error',
-            message: 'Bulut yavaş yanıt veriyor. Ayarlar → Şimdi Senkronize Et ile tekrar deneyin.',
+            message: 'Bulut yavaş yanıt veriyor. Yerel veriler gösteriliyor — birazdan tekrar denenecek.',
             lastUserId: null,
           },
         });
       }
     }, 25000);
     try {
-      // Önce yereli temizle: önceki hesabın verisi yeni hesaba karışmasın!
-      await db.transactions.clear();
-      await db.categories.clear();
-      set({ transactions: [], categories: [] });
+      // NOT: önceki hesabın verisi çıkışta clearLocalData ile zaten temizlenir.
+      // Burada kör clear() YOK — pull birleştirir (last-write-wins); başarısız
+      // olursa yerel veri aynen durur (offline-first).
       const { pulledTx, pulledCat } = await pullUserData();
       // Kategori onarımı: işlemin categoryId'si yerelde yoksa ad+tip ile eşleştir
       // (farklı cihazda aynı varsayılan kategori farklı id ile olabilir;
@@ -207,6 +232,15 @@ export const useStore = create<Store>()((set, get) => ({
   },
 
   clearLocalData: async () => {
+    // Çıkışta önce bekleyen veriyi buluta göndermeyi dene (çevrimiçiyse);
+    // başarısız/çevrimdışı olsa bile bellek+yerel temizlenir ki hesap karışmasın.
+    try {
+      if (typeof navigator === 'undefined' || navigator.onLine) {
+        await pushUserData();
+      }
+    } catch {
+      /* yoksay — çıkış engellenmesin */
+    }
     await db.transactions.clear();
     await db.categories.clear();
     const now = new Date().toISOString();

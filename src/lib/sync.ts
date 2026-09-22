@@ -296,8 +296,15 @@ function saveUserWorkspaceId(id: string): void {
   }
 }
 
+function requireOnline(): void {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    throw new Error('Çevrimdışısınız — yerel veriler gösteriliyor.');
+  }
+}
+
 async function requireUser() {
   if (!supabase) throw new Error('Supabase yapılandırılmamış (.env eksik).');
+  requireOnline();
   const {
     data: { user },
   } = await supabase.auth.getUser();

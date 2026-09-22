@@ -45,6 +45,12 @@ export default defineConfig({
       },
       workbox: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
+        // OFFLINE-FIRST: uygulama kabuğu (app shell) çevrimdışı da açılsın
+        navigateFallback: 'index.html',
+        cleanupOutdatedCaches: true,
+        // Supabase API asla cache'lenmez — sadece uygulama dosyaları çevrimdışı çalışır,
+        // veri Dexie (IndexedDB) + arka plan senkron ile eşitlenir.
+        navigateFallbackDenylist: [/^\/api\//],
       },
     }),
   ],
